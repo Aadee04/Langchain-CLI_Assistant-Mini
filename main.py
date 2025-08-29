@@ -2,69 +2,96 @@ import os
 import sys
 from langchain_community.llms import Ollama
 from langchain.chains import ConversationChain
+from langchain.tools import tool
 from langchain.memory import ConversationBufferMemory
-from tools import get_time, open_calculator, search_wikipedia
-from tools.tool_builder import run_python
 import importlib
 import pkgutil
-
-# NLP imports for stemming/lemmatization
-try:
-    import nltk
-    from nltk.stem import PorterStemmer, WordNetLemmatizer
-except ImportError:
-    nltk = None
-    PorterStemmer = None
-    WordNetLemmatizer = None
-
-# Download NLTK data if needed
-if nltk is not None:
-    try:
-        nltk.data.find('corpora/wordnet')
-    except LookupError:
-        nltk.download('wordnet')
-    try:
-        nltk.data.find('tokenizers/punkt')
-    except LookupError:
-        nltk.download('punkt')
-
-# Initialize NLP tools
-stemmer = PorterStemmer() if PorterStemmer else None
-lemmatizer = WordNetLemmatizer() if WordNetLemmatizer else None
-
+import os, importlib, inspect
+from langchain.tools import BaseTool
 from langchain.tools import Tool
 from langchain.agents import initialize_agent, AgentType
 
-def permission_check(tool_name):
-    # Example: Only allow certain tools, or prompt user for permission
-    allowed_tools = {"get_time", "open_calculator", "search_wikipedia", "run_python"}
-    return tool_name in allowed_tools
 
-def load_tools():
-    tool_funcs = {}
-    for finder, name, ispkg in pkgutil.iter_modules([os.path.join(os.path.dirname(__file__), 'tools')]):
-        if name.startswith("__") or name == "tool_builder":
-            continue
-        module = importlib.import_module(f"tools.{name}")
-        for attr in dir(module):
-            if not attr.startswith("_") and callable(getattr(module, attr)):
-                tool_funcs[attr] = getattr(module, attr)
-    # Add run_python from tool_builder
-    tool_funcs["run_python"] = run_python
-    return tool_funcs
+def discover_tools():
+    tools = []
+    for file in os.listdir("tools"):
+        if file.endswith(".py") and file not in ["__init__.py"]:
+            name = file[:-3]
+            module = importlib.import_module(f"tools.{name}")
+            for attr_name in dir(module):
+                attr = getattr(module, attr_name)
+                # check if it's a LangChain tool
+                if isinstance(attr, BaseTool):
+                    tools.append(attr)
+                # check if it's a function decorated with @tool
+                elif callable(attr) and hasattr(attr, "name") and hasattr(attr, "description"):
+                    tools.append(attr)
+    return tools
 
-tool_funcs = load_tools()
+langchain_tools = discover_tools()
+tool_list_str = "\n".join([f"- {t.name}: {t.description}" for t in langchain_tools])
 
-langchain_tools = [
-    Tool(
-        name=tool_name,
-        func=(lambda *args, tool=tool_name: tool_funcs[tool](*args) if permission_check(tool) else "Permission denied."),
-        description=f"Dynamically loaded tool: {tool_name}"
-    ) for tool_name in tool_funcs
-]
+
+# Print available tools for debugging and LLM context
+print(f"\nAvailable tools: {tool_list_str} \n\n")
+
+# System prompt for the agent/LLM
+SYSTEM_PROMPT = """
+You are a Desktop Assistant. You have access to the following tools:
+
+{tool_list}
+
+RULES:
+1. You MUST always use a tool to answer, unless it is absolutely impossible. 
+2. Your output must ALWAYS be valid JSON in this format:
+{
+  "action": "<tool_name>",
+  "action_input": "<string or object input>"
+}
+
+Never add explanations, text, or code fences. Output JSON only.
+
+3. Do NOT just answer directly. If you cannot complete the task with the current tools, use the run_python tool to create a new one.
+4. Never invent tools. Only use tools from the provided list.
+
+EXAMPLES:
+
+User: What time is it?
+{
+  "action": "get_time",
+  "action_input": ""
+}
+
+User: Open the calculator
+{
+  "action": "open_calculator",
+  "action_input": ""
+}
+
+User: Search Wikipedia for 'LangChain'
+{
+  "action": "search_wikipedia",
+  "action_input": "LangChain"
+}
+
+User: I need to download a file
+{
+  "action": "run_python",
+  "action_input": "
+import requests
+url = "https://example.com/file.txt"
+r = requests.get(url)
+with open("file.txt", "wb") as f:
+    f.write(r.content)
+print("File downloaded successfully.")"
+}
+
+
+Begin now. Remember: Always respond with Action + Action Input. "action_input" must always be a string (use "" if no input).
+"""
 
 # Initialize Ollama LLM (Phi-3 Mini)
-llm = Ollama(model="phi3")
+llm = Ollama(model="phi3", system=SYSTEM_PROMPT)
 
 # Conversation memory
 memory = ConversationBufferMemory()
@@ -81,65 +108,19 @@ try:
     agent = initialize_agent(
         langchain_tools,
         llm,
-        agent=AgentType.ZERO_SHOT_REACT_DESCRIPTION,
+        agent=AgentType.STRUCTURED_CHAT_ZERO_SHOT_REACT_DESCRIPTION,
         memory=memory,
-        verbose=True
+        verbose=True,
+        handle_parsing_errors=True
     )
+
     agent_supported = True
+
 except Exception as e:
+    print(f"Agent init failed: {e}")
     agent = None
     agent_supported = False
 
-def print_help():
-    print("""
-Available commands:
-  time                - Show current system time
-  calc                - Open calculator (Windows)
-  wiki <query>        - Search Wikipedia for <query>
-  help                - Show this help message
-  exit, quit          - Exit the assistant
-Any other input will be sent to the LLM assistant or agent.
-""")
-
-def preprocess_command(user_input):
-    """Return stemmed and lemmatized first word and args."""
-    if not user_input:
-        return '', []
-    words = user_input.strip().split()
-    cmd = words[0].lower()
-    args = words[1:]
-    # Apply stemming and lemmatization
-    if stemmer:
-        cmd_stem = stemmer.stem(cmd)
-    else:
-        cmd_stem = cmd
-    if lemmatizer:
-        cmd_lemma = lemmatizer.lemmatize(cmd)
-    else:
-        cmd_lemma = cmd
-    return cmd, cmd_stem, cmd_lemma, args
-
-def detect_intent(user_input):
-    """Detect intent for tool use from natural language input."""
-    text = user_input.lower()
-    # Time intent
-    if any(kw in text for kw in ["what time", "current time", "date and time", "show time", "tell time", "now"]):
-        return "time", []
-    # Calculator intent
-    if any(kw in text for kw in ["open calculator", "launch calculator", "start calculator", "calculator app", "calc app", "open calc", "launch calc"]):
-        return "calc", []
-    # Wikipedia intent
-    if any(kw in text for kw in ["search wikipedia", "look up", "wikipedia", "wiki", "summarize from wikipedia", "find on wikipedia"]):
-        # Try to extract query
-        import re
-        match = re.search(r'(?:search|look up|find|summarize from)? ?(?:wikipedia|wiki)? ?([\w\s]+)', text)
-        if match:
-            query = match.group(1).strip()
-            if query:
-                return "wiki", [query]
-        # Fallback: ask for query
-        return "wiki", []
-    return None, []
 
 def main():
     print("LangChain CLI Assistant (Phi-3 Mini via Ollama)")
@@ -148,56 +129,32 @@ def main():
         user_input = input("You: ").strip()
         if not user_input:
             continue
-        # 1. Intent detection (natural language)
-        intent, intent_args = detect_intent(user_input)
-        if intent == "time":
-            print(f"[Time] {get_time()}\n")
-            continue
-        elif intent == "calc":
-            print(f"[Calc] {open_calculator()}\n")
-            continue
-        elif intent == "wiki":
-            if not intent_args:
-                print("Usage: wiki <query>\n")
-            else:
-                print(f"[Wiki] {search_wikipedia(' '.join(intent_args))}\n")
-            continue
-        # 2. Command parsing (stem/lemma)
-        cmd, cmd_stem, cmd_lemma, args = preprocess_command(user_input)
-        time_cmds = {"time", "tim", "times"}
-        calc_cmds = {"calc", "calcul", "calculate", "calculator"}
-        wiki_cmds = {"wiki", "wikipedia", "search"}
-        help_cmds = {"help", "assist", "h"}
-        exit_cmds = {"exit", "quit", "close", "bye"}
-        if cmd in exit_cmds or cmd_stem in exit_cmds or cmd_lemma in exit_cmds:
+        cmd = user_input.lower().strip()
+        if cmd in {"exit", "quit", "close", "bye"}:
             print("Goodbye!")
             break
-        elif cmd in help_cmds or cmd_stem in help_cmds or cmd_lemma in help_cmds:
-            print_help()
-            continue
-        elif cmd in time_cmds or cmd_stem in time_cmds or cmd_lemma in time_cmds:
-            print(f"[Time] {get_time()}\n")
-            continue
-        elif cmd in calc_cmds or cmd_stem in calc_cmds or cmd_lemma in calc_cmds:
-            print(f"[Calc] {open_calculator()}\n")
-            continue
-        elif cmd in wiki_cmds or cmd_stem in wiki_cmds or cmd_lemma in wiki_cmds:
-            if not args:
-                print("Usage: wiki <query>\n")
-            else:
-                print(f"[Wiki] {search_wikipedia(' '.join(args))}\n")
-            continue
-        # 3. LangChain agent tool-calling (if supported)
+        # Try agent first
         if agent_supported:
             try:
-                response = agent.run(user_input)
-                print(f"Assistant: {response}\n")
+                result = agent.invoke(
+                    {"input": user_input},
+                    return_intermediate_steps=True
+                )
+                if "intermediate_steps" in result:
+                    print("--- LLM Reasoning (Agent Steps) ---")
+                    for action, observation in result["intermediate_steps"]:
+                        print(f"Action: {action.tool}")
+                        print(f"Action Input: {action.tool_input}")
+                        print(f"Observation: {observation}\n")
+                    print("--- End Reasoning ---\n")
+                print(f"Assistant: {result['output']}\n")
                 continue
             except Exception as e:
                 print(f"[Agent error: {e}] Fallback to LLM.\n")
-        # 4. Fallback: LLM conversation
+        # Fallback: LLM conversation
         response = conversation.predict(input=user_input)
         print(f"Assistant: {response}\n")
+        print("Agent not supported with this LLM. Only basic conversation available.\n")
 
 if __name__ == "__main__":
     main()

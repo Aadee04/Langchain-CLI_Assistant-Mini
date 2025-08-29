@@ -1,9 +1,11 @@
+from langchain.tools import tool
 try:
     import wikipedia
 except ImportError:
     wikipedia = None
 
-def search_wikipedia(query):
+@tool("search_wikipedia")
+def search_wikipedia(query: str = ""):
     """Search Wikipedia for a query and return a summary."""
     if wikipedia is None:
         return "Wikipedia module not installed. Run 'pip install wikipedia'."

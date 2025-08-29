@@ -1,7 +1,9 @@
+from langchain.tools import tool
 import os
 import subprocess
 
-def open_calculator():
+@tool("open_calculator", return_direct=True)
+def open_calculator(query: str = None) -> str:
     """Open the calculator app (Windows only)."""
     if os.name == "nt":
         subprocess.Popen(["calc.exe"])

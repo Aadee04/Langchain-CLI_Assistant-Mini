@@ -1,7 +1,9 @@
+from langchain.tools import tool
 import sys
 import io
 
-def run_python(code):
+@tool("run_python")
+def run_python(code: str = ""):
     """Execute Python code and return the output or error."""
     old_stdout = sys.stdout
     old_stderr = sys.stderr
