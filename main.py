@@ -52,7 +52,7 @@ RULES:
 Never add explanations, text, or code fences. Output JSON only.
 
 3. Do NOT just answer directly. If you cannot complete the task with the current tools, use the run_python tool to create a new one.
-4. Never invent tools. Only use tools from the provided list.
+4. Only use tools from the provided list.
 
 EXAMPLES:
 
@@ -87,7 +87,11 @@ print("File downloaded successfully.")"
 }
 
 
-Begin now. Remember: Always respond with Action + Action Input. "action_input" must always be a string (use "" if no input).
+Begin now. Remember: Always respond with Action + Action Input. 
+"action_input" must always be a string (use "" if no input).
+You MUST always use a tool to answer, unless it is absolutely impossible. 
+Do not add any coding comments. 
+Any output to the user must be in a normal human tone.
 """
 
 # Initialize Ollama LLM (Phi-3 Mini)

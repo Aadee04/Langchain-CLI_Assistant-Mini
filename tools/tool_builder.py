@@ -4,7 +4,7 @@ import io
 
 @tool("run_python")
 def run_python(code: str = ""):
-    """Execute Python code and return the output or error."""
+    """Execute Python code and return the output or error. Input is the code to execute. Output is the result or error message."""
     old_stdout = sys.stdout
     old_stderr = sys.stderr
     sys.stdout = io.StringIO()
